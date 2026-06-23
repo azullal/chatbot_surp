@@ -2,18 +2,38 @@ import os
 import re
 import json
 import requests
-import streamlit as st
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
 
-api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key)
-
 BASE_URL = "https://dictionary.kubishi.com/api"
 
+def get_openai_api_key():
+
+    api_key = os.getenv("OPENAI_API_KEY")
+
+    if api_key:
+        return api_key
+
+    try:
+        import streamlit as st
+        return st.secrets.get("OPENAI_API_KEY")
+    except Exception:
+        return None
+
+
+api_key = get_openai_api_key()
+
+if not api_key:
+    raise ValueError(
+        "OPENAI_API_KEY not found. "
+        "Add it to a .env file or to .streamlit/secrets.toml."
+    )
+
+
+client = OpenAI(api_key=api_key)
 
 def classify_request(user_input):
     text = user_input.lower()
@@ -150,6 +170,22 @@ def extract_best_entry(api_response):
         "definition": first_sense.get("definition", "No definition available"),
     }
 
+def format_entry(entry):
+    """
+    Convert a dictionary entry into a nice Markdown response.
+    """
+
+    return f"""
+## Dictionary Result
+
+**Search term:** `{entry.get("search_term", "Unknown")}`
+
+**Paiute word:** {entry.get("word", "Unknown")}
+
+**Meaning:** {entry.get("gloss", "No gloss available")}
+
+**Definition:** {entry.get("definition", "No definition available")}
+"""
 
 def lookup_word(user_input):
     search_term = rewrite_query(user_input)
@@ -278,51 +314,79 @@ def process_input(user_input):
         topic = extract_topic(user_input)
         content = build_word_list(topic)
 
+        if not content:
+            content = (
+                "I could not find enough dictionary information for that topic. "
+                "Try asking for a simpler topic, like water, animals, food, or family."
+            )
+
         return {
             "word": f"Vocabulary List: {topic.title()}",
             "gloss": "Word list",
-            "definition": content or (
-                "I could not find enough dictionary information for that topic."
-            ),
+            "definition": content,
             "search_term": topic,
+            "content": content,
         }
 
     if intent == "sentences":
         content = build_sentences(user_input)
 
+        if not content:
+            content = (
+                "I could not find enough dictionary information to create sentences. "
+                "Try asking with a simpler word, like water, food, or family."
+            )
+
         return {
             "word": "Example Sentences",
             "gloss": "Sentence practice",
-            "definition": content or (
-                "I could not find enough dictionary information to create sentences."
-            ),
+            "definition": content,
             "search_term": rewrite_query(user_input),
+            "content": content,
         }
 
     if intent == "slides":
         topic = extract_topic(user_input)
         content = build_slides(user_input)
 
+        if not content:
+            content = (
+                "I could not find enough dictionary information to create slides. "
+                "Try asking for a simpler topic, like water, animals, food, or family."
+            )
+
         return {
             "word": f"Slide Outline: {topic.title()}",
             "gloss": "Lesson slides",
-            "definition": content or (
-                "I could not find enough dictionary information to create slides."
-            ),
+            "definition": content,
             "search_term": topic,
+            "content": content,
         }
 
     entry = lookup_word(user_input)
 
     if entry:
-        return entry
+        content = format_entry(entry)
+
+        return {
+            "word": entry["word"],
+            "gloss": entry["gloss"],
+            "definition": entry["definition"],
+            "search_term": entry["search_term"],
+            "content": content,
+        }
+
+    search_term = rewrite_query(user_input)
+
+    content = (
+        "I could not find enough dictionary information for that request. "
+        "Try asking with a simpler word or topic, like water, animals, food, or family."
+    )
 
     return {
         "word": "No Result Found",
         "gloss": "No matching entry",
-        "definition": (
-            "I could not find enough dictionary information for that request. "
-            "Try asking with a simpler word or topic, like water, animals, food, or family."
-        ),
-        "search_term": rewrite_query(user_input),
+        "definition": content,
+        "search_term": search_term,
+        "content": content,
     }
