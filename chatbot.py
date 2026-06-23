@@ -20,6 +20,24 @@ def rewrite_query(user_input):
     'What is the Paiute word for water?' -> 'water'
     """
 
+    text = user_input.lower().strip()
+
+    # Common pattern: "Paiute word for water"
+    if "word for" in text:
+        return text.split("word for")[-1].strip(" ?.!")
+
+    # Common pattern: "how do you say water"
+    if "say" in text:
+        return text.split("say")[-1].strip(" ?.!")
+
+    # Common pattern: "what does puni mean"
+    if "what does" in text and "mean" in text:
+        return (
+            text.replace("what does", "")
+            .replace("mean", "")
+            .strip(" ?.!'\"")
+        )
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -27,16 +45,13 @@ def rewrite_query(user_input):
                 {
                     "role": "system",
                     "content": (
-                        "You extract dictionary search terms. "
-                        "Return only one short search term. "
-                        "Do not explain your answer."
+                        "Extract only the English word or Paiute word being searched. "
+                        "Do not return words like Paiute, Owens Valley, language, or word."
                     ),
                 },
                 {
                     "role": "user",
-                    "content": (
-                        f"Extract the best dictionary search term from this question: {user_input}"
-                    ),
+                    "content": user_input,
                 },
             ],
         )
@@ -93,15 +108,6 @@ def extract_best_entry(api_response):
 
 
 def process_input(user_input):
-    """
-    Full chatbot pipeline:
-    1. Take user question
-    2. Rewrite it as a dictionary search term
-    3. Search the dictionary
-    4. Extract the best result
-    5. Return formatted data
-    """
-
     if not user_input or not user_input.strip():
         return None
 
@@ -110,5 +116,8 @@ def process_input(user_input):
     api_response = search_dictionary(search_term)
 
     entry = extract_best_entry(api_response)
+
+    if entry:
+        entry["search_term"] = search_term
 
     return entry
