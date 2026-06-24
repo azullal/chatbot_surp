@@ -2,22 +2,54 @@ import os
 import re
 import json
 import requests
-import streamlit as st
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
 
-api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key)
-
 BASE_URL = "https://dictionary.kubishi.com/api"
 
+def get_openai_api_key():
+
+    api_key = os.getenv("OPENAI_API_KEY")
+
+    if api_key:
+        return api_key
+
+    try:
+        import streamlit as st
+        return st.secrets.get("OPENAI_API_KEY")
+    except Exception:
+        return None
+
+
+api_key = get_openai_api_key()
+
+if not api_key:
+    raise ValueError(
+        "OPENAI_API_KEY not found. "
+        "Add it to a .env file or to .streamlit/secrets.toml."
+    )
+
+
+client = OpenAI(api_key=api_key)
+
+TOPIC_FALLBACKS = {
+    "animals": ["dog", "horse", "rabbit", "fish", "bird", "deer"],
+    "animal": ["dog", "horse", "rabbit", "fish", "bird", "deer"],
+    "food": ["food", "water", "meat", "fish", "eat", "drink"],
+    "family": ["mother", "father", "daughter", "son", "child", "woman", "man"],
+    "nature": ["water", "mountain", "tree", "sun", "moon", "fire", "wind"],
+}
 
 def classify_request(user_input):
     text = user_input.lower()
 
+    if any(phrase in text for phrase in ["paiute sentence", "full sentence", "translated sentence"]
+    ):
+        return "verified_sentence"
+    
     if any(word in text for word in ["list", "words related", "vocabulary", "vocab"]):
         return "word_list"
 
@@ -33,15 +65,46 @@ def classify_request(user_input):
 def extract_topic(user_input):
     text = user_input.lower().strip()
 
-    for phrase in ["related to", "about", "for"]:
-        if phrase in text:
-            return text.split(phrase)[-1].strip(" ?.!")
+    remove_phrases = [
+        "provide me with",
+        "give me",
+        "make",
+        "create",
+        "list",
+        "a list of",
+        "vocabulary",
+        "words",
+        "word list",
+        "related to",
+        "about",
+        "lesson",
+        "slides",
+        "slide",
+    ]
 
-    return text.strip(" ?.!")
+    for phrase in remove_phrases:
+        text = text.replace(phrase, "")
 
+    text = text.strip(" ?.!")
+    
+    if "animal" in text:
+        return "animals"
+    if "food" in text:
+        return "food"
+    if "family" in text:
+        return "family"
+    if "nature" in text:
+        return "nature"
 
+    return text
 
 def generate_topic_words(topic, count=8):
+
+    topic = topic.lower().strip()
+
+    if topic in TOPIC_FALLBACKS:
+        return TOPIC_FALLBACKS[topic][:count]
+    
     prompt = f"""
 Generate {count} simple English dictionary search terms related to the topic "{topic}".
 
@@ -146,10 +209,92 @@ def extract_best_entry(api_response):
 
     return {
         "word": entry.get("word", "Unknown"),
-        "gloss": first_sense.get("gloss", "No gloss available"),
+        "glossary": first_sense.get("glossary", "No glossary available"),
         "definition": first_sense.get("definition", "No definition available"),
     }
 
+def extract_examples_from_entry(api_response):
+    if not api_response:
+        return []
+
+    results = api_response.get("results", [])
+    examples = []
+
+    possible_example_fields = [
+        "examples",
+        "example_sentences",
+        "sentences",
+        "usage_examples",
+    ]
+
+    for entry in results:
+        for field in possible_example_fields:
+            if field in entry and isinstance(entry[field], list):
+                examples.extend(entry[field])
+
+        senses = entry.get("senses", [])
+
+        for sense in senses:
+            for field in possible_example_fields:
+                if field in sense and isinstance(sense[field], list):
+                    examples.extend(sense[field])
+
+    return examples
+
+
+def normalize_example(example):
+    if isinstance(example, str):
+        return {
+            "paiute": example,
+            "english": "No English translation provided.",
+        }
+
+    if isinstance(example, dict):
+        paiute = (
+            example.get("paiute")
+            or example.get("sentence")
+            or example.get("text")
+            or example.get("ovp")
+            or example.get("source")
+            or example.get("paiute_sentence")
+            or "No Paiute sentence provided."
+        )
+
+        english = (
+            example.get("english")
+            or example.get("translation")
+            or example.get("glossary")
+            or example.get("meaning")
+            or example.get("english_translation")
+            or "No English translation provided."
+        )
+
+        return {
+            "paiute": paiute,
+            "english": english,
+        }
+
+    return {
+        "paiute": "No Paiute sentence provided.",
+        "english": "No English translation provided.",
+    }
+
+def format_entry(entry):
+    """
+    Convert a dictionary entry into a nice Markdown response.
+    """
+
+    return f"""
+## Dictionary Result
+
+**Search term:** `{entry.get("search_term", "Unknown")}`
+
+**Paiute word:** {entry.get("word", "Unknown")}
+
+**Meaning:** {entry.get("glossary", "No glossary available")}
+
+**Definition:** {entry.get("definition", "No definition available")}
+"""
 
 def lookup_word(user_input):
     search_term = rewrite_query(user_input)
@@ -162,6 +307,117 @@ def lookup_word(user_input):
 
     return None
 
+def retrieve_example_sentence(user_input):
+    search_term = rewrite_query(user_input)
+    api_response = search_dictionary(search_term)
+
+    entry = extract_best_entry(api_response)
+    examples = extract_examples_from_entry(api_response)
+
+    if not entry:
+        return None
+
+    if not examples:
+        return {
+            "word": entry["word"],
+            "glossary": entry["glossary"],
+            "definition": entry["definition"],
+            "search_term": search_term,
+            "paiute_sentence": None,
+            "english_translation": None,
+        }
+
+    normalized = [normalize_example(example) for example in examples]
+
+    best_example = normalized[0]
+
+    return {
+        "word": entry["word"],
+        "glossary": entry["glossary"],
+        "definition": entry["definition"],
+        "search_term": search_term,
+        "paiute_sentence": best_example["paiute"],
+        "english_translation": best_example["english"],
+    }
+
+
+def explain_verified_sentence(sentence_data):
+    if not sentence_data:
+        return None
+
+    if not sentence_data["paiute_sentence"]:
+        return f"""
+## No Example Sentence Found
+
+**Search term:** `{sentence_data["search_term"]}`
+
+**Dictionary word:** {sentence_data["word"]}
+
+**Meaning:** {sentence_data["glossary"]}
+
+**Definition:** {sentence_data["definition"]}
+
+I found the dictionary entry, but I did not find a verified example sentence attached to this entry.
+"""
+
+    prompt = f"""
+You are helping explain a verified Owens Valley Paiute example sentence.
+
+Use ONLY the information below.
+Do not invent new Paiute words.
+Do not create a new Paiute sentence.
+Do not claim grammar rules unless they are directly visible from the sentence.
+
+Dictionary entry:
+Search term: {sentence_data["search_term"]}
+Paiute word: {sentence_data["word"]}
+Meaning: {sentence_data["glossary"]}
+Definition: {sentence_data["definition"]}
+
+Verified example sentence:
+Paiute: {sentence_data["paiute_sentence"]}
+English: {sentence_data["english_translation"]}
+Explain the Paiute sentence in detail, including:
+- Word-by-word breakdown
+- Grammatical structure
+
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You explain retrieved Owens Valley Paiute examples carefully. "
+                    "You do not invent grammar or new sentences."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+    )
+
+    return response.choices[0].message.content
+
+def format_verified_sentence(sentence_data):
+    return f"""
+## Verified Example Sentence
+
+**Search term:** `{sentence_data["search_term"]}`
+
+**Dictionary word:** {sentence_data["word"]}
+
+**Meaning:** {sentence_data["glossary"]}
+
+**Paiute sentence:** {sentence_data["paiute_sentence"]}
+
+**English translation:** {sentence_data["english_translation"]}
+
+This sentence was retrieved from the source data.
+"""
 
 def build_word_list(topic):
     search_terms = generate_topic_words(topic)
@@ -182,7 +438,7 @@ def build_word_list(topic):
     response += f"Generated search terms: `{', '.join(search_terms)}`\n\n"
 
     for entry in entries:
-        response += f"- **{entry['word']}** — {entry['gloss']}\n"
+        response += f"- **{entry['word']}** — {entry['glossary']}\n"
         response += f"  - Search term: `{entry['search_term']}`\n"
         response += f"  - Definition: {entry['definition']}\n\n"
 
@@ -190,47 +446,13 @@ def build_word_list(topic):
 
 
 def build_sentences(user_input):
-    entry = lookup_word(user_input)
+    sentence_data = retrieve_example_sentence(user_input)
 
-    if not entry:
+    if not sentence_data:
         return None
 
-    prompt = f"""
-Create 3 beginner-friendly English practice sentences for this dictionary entry.
-
-Word: {entry["word"]}
-Gloss: {entry["gloss"]}
-Definition: {entry["definition"]}
-
-Rules:
-- Do not invent Paiute grammar.
-- Use English sentences.
-- Keep the sentences simple.
-"""
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": "You create careful beginner language-learning materials.",
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-    )
-
-    return f"""
-## Example Sentences
-
-**Word:** {entry["word"]}
-
-**Meaning:** {entry["gloss"]}
-
-{response.choices[0].message.content}
-"""
+    if sentence_data["paiute_sentence"]:
+        return format_verified_sentence(sentence_data)
 
 
 def build_slides(user_input):
@@ -251,7 +473,10 @@ Slide 2: Vocabulary words
 Slide 3: Practice activity
 Slide 4: Review question
 
-Keep it classroom-friendly.
+Rules:
+- Do not invent new Paiute words.
+- Use only the vocabulary shown in the retrieved content.
+- Keep it classroom-friendly.
 """
 
     response = client.chat.completions.create(
@@ -259,7 +484,7 @@ Keep it classroom-friendly.
         messages=[
             {
                 "role": "system",
-                "content": "You create simple educational slide outlines.",
+                "content": "You create simple educational slide outlines from retrieved vocabulary only..",
             },
             {
                 "role": "user",
@@ -274,55 +499,22 @@ Keep it classroom-friendly.
 def process_input(user_input):
     intent = classify_request(user_input)
 
-    if intent == "word_list":
+    if intent == "verified_sentence":
+        sentence_data = retrieve_example_sentence(user_input)
+        content = explain_verified_sentence(sentence_data)
+
+    elif intent == "word_list":
         topic = extract_topic(user_input)
         content = build_word_list(topic)
 
-        return {
-            "word": f"Vocabulary List: {topic.title()}",
-            "gloss": "Word list",
-            "definition": content or (
-                "I could not find enough dictionary information for that topic."
-            ),
-            "search_term": topic,
-        }
-
-    if intent == "sentences":
+    elif intent == "sentences":
         content = build_sentences(user_input)
 
-        return {
-            "word": "Example Sentences",
-            "gloss": "Sentence practice",
-            "definition": content or (
-                "I could not find enough dictionary information to create sentences."
-            ),
-            "search_term": rewrite_query(user_input),
-        }
-
-    if intent == "slides":
-        topic = extract_topic(user_input)
+    elif intent == "slides":
         content = build_slides(user_input)
 
-        return {
-            "word": f"Slide Outline: {topic.title()}",
-            "gloss": "Lesson slides",
-            "definition": content or (
-                "I could not find enough dictionary information to create slides."
-            ),
-            "search_term": topic,
-        }
+    else:
+        entry = lookup_word(user_input)
 
-    entry = lookup_word(user_input)
-
-    if entry:
-        return entry
-
-    return {
-        "word": "No Result Found",
-        "gloss": "No matching entry",
-        "definition": (
-            "I could not find enough dictionary information for that request. "
-            "Try asking with a simpler word or topic, like water, animals, food, or family."
-        ),
-        "search_term": rewrite_query(user_input),
-    }
+        if entry:
+                content = format_entry(entry)

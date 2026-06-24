@@ -5,12 +5,13 @@ from chatbot import process_input
 st.set_page_config(
     page_title="Owens Valley Paiute Chatbot",
     page_icon="💬",
+    layout="centered"
 )
 
 st.title("Owens Valley Paiute Chatbot")
 
 st.write(
-    "Ask a question about Owens Valley Paiute vocabulary."
+    "Ask a question about Owens Valley Paiute vocabulary. "
     "You can request definitions, word lists, example sentences, or slide outlines."
 
 )
@@ -40,18 +41,21 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    with st.spinner("Searching the dictionary..."):
-        result = process_input(prompt)
-
-    response = result["content"]
-
     with st.chat_message("assistant"):
-        st.markdown(response)
+        with st.spinner("Thinking..."):
+            try:
+                result = process_input(prompt)
+
+                if isinstance(result, dict):
+                    response = result.get("content", str(result))
+                else:
+                    response = str(result)
+
+            except Exception as e:
+                response = f"Sorry, something went wrong: {e}"
+
+            st.markdown(response)
 
     st.session_state.messages.append(
-        {
-            "role": "assistant",
-            "content": response,
-        }
+        {"role": "assistant", "content": response}
     )
-    
