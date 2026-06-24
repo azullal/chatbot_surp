@@ -6,8 +6,6 @@ import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from examples import find_example_sentences
-
 load_dotenv()
 
 BASE_URL = "https://dictionary.kubishi.com/api"
@@ -225,6 +223,66 @@ def search_dictionary(query):
         print(f"Dictionary search error: {error}")
         return None
 
+def search_example_sentences(query, limit=20):
+    """
+    Search verified example sentences from the dictionary API.
+    """
+
+    try:
+        response = requests.get(
+            f"{BASE_URL}/search-sentences",
+            params={
+                "q": query,
+                "limit": limit,
+            },
+            timeout=10,
+        )
+
+        response.raise_for_status()
+        return response.json()
+
+    except Exception as error:
+        print(f"Example sentence search error: {error}")
+        return None
+    
+def format_api_example_sentences(example_response, search_term, entry):
+    """
+    Format example sentences returned from the API.
+    """
+
+    if not example_response:
+        return None
+
+    results = example_response.get("results", [])
+
+    if not results:
+        return None
+
+    response = f"""
+## Example Sentences for `{search_term}`
+
+**Dictionary word:** {entry.get("word", "Unknown")}
+
+**Definition:** {entry.get("definition", "No definition available")}
+
+These examples were retrieved from the verified dictionary example sentence database.
+
+"""
+
+    for index, example in enumerate(results[:5], start=1):
+        paiute = example.get("text", "No Paiute sentence provided.")
+        english = example.get("translation", "No English translation provided.")
+
+        response += f"""
+### Example {index}
+
+**Paiute:** {paiute}
+
+**English:** {english}
+
+"""
+
+    return response
 
 def extract_best_entry(api_response):
     """
@@ -317,8 +375,7 @@ These examples come from the verified local example sentence database.
 
 def build_sentences(user_input):
     """
-    Retrieve verified example sentences for any word that appears
-    in examples.json.
+    Retrieve verified example sentences from the dictionary sentence API.
     """
 
     search_term = rewrite_query(user_input)
@@ -335,35 +392,46 @@ I could not find a dictionary entry for `{search_term}`.
 
     dictionary_word = entry.get("word", "")
 
-    examples = find_example_sentences(
-        [search_term, dictionary_word],
-        max_examples=5,
+    # First search examples with the user's English/Paiute query.
+    example_response = search_example_sentences(search_term, limit=20)
+
+    formatted_examples = format_api_example_sentences(
+        example_response=example_response,
+        search_term=search_term,
+        entry=entry,
     )
 
-    if examples:
-        return format_example_sentences(
-            examples=examples,
+    if formatted_examples:
+        return formatted_examples
+
+    # If nothing is found, try searching examples with the Paiute dictionary word.
+    if dictionary_word:
+        example_response = search_example_sentences(dictionary_word, limit=20)
+
+        formatted_examples = format_api_example_sentences(
+            example_response=example_response,
             search_term=search_term,
             entry=entry,
         )
 
+        if formatted_examples:
+            return formatted_examples
+
     return f"""
-## No Example Sentence Found
+## No Verified Example Sentence Found
+
+I found the dictionary entry, but I could not find verified example sentences from the sentence API.
 
 **Search term:** `{search_term}`
 
 **Dictionary word:** {dictionary_word}
 
 **Definition:** {entry.get("definition", "No definition available")}
-
-I found the dictionary entry, but I could not find a verified example sentence in `examples.json`.
-
-To support this word, add verified examples for `{search_term}` or `{dictionary_word}` to `examples.json`.
 """
 
 def explain_verified_sentence(user_input):
     """
-    Explain one retrieved example sentence without inventing new Paiute.
+    Explain one verified sentence retrieved from the sentence API.
     """
 
     search_term = rewrite_query(user_input)
@@ -380,19 +448,21 @@ I could not find a dictionary entry for `{search_term}`.
 
     dictionary_word = entry.get("word", "")
 
-    examples = find_example_sentences(
-        [search_term, dictionary_word],
-        max_examples=1,
-    )
+    example_response = search_example_sentences(search_term, limit=1)
+    results = example_response.get("results", []) if example_response else []
 
-    if not examples:
+    if not results and dictionary_word:
+        example_response = search_example_sentences(dictionary_word, limit=1)
+        results = example_response.get("results", []) if example_response else []
+
+    if not results:
         return f"""
 ## No Verified Sentence Found
 
-I found the dictionary entry for `{search_term}`, but I could not find a verified sentence in `examples.json`.
+I found the dictionary entry for `{search_term}`, but I could not find a verified sentence from the sentence API.
 """
 
-    example = examples[0]
+    example = results[0]
 
     prompt = f"""
 You are helping explain a verified Owens Valley Paiute example sentence.
@@ -408,8 +478,8 @@ Paiute word: {entry.get("word")}
 Definition: {entry.get("definition")}
 
 Verified example sentence:
-Paiute: {example.get("paiute")}
-English: {example.get("english")}
+Paiute: {example.get("text")}
+English: {example.get("translation")}
 
 Explain the sentence carefully.
 Include:
