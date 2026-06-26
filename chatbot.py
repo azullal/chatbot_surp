@@ -80,6 +80,88 @@ def normalize_text(text):
         .strip()
     )
 
+def similarity(a, b):
+    """
+    Return a rough similarity score between two strings.
+    """
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+def clean_text(value):
+    """
+    Normalize text for matching.
+    """
+    if not value:
+        return ""
+
+    return (
+        str(value)
+        .lower()
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
+        .strip()
+    )
+
+def get_entry_fields(entry):
+    """
+    Extract word, glossary, and definition from a raw API entry.
+    """
+    senses = entry.get("senses", [])
+    first_sense = senses[0] if senses else {}
+
+    return {
+        "word": entry.get("word", "Unknown"),
+        "glossary": first_sense.get("glossary") or "No glossary available",
+        "definition": first_sense.get("definition") or "No definition available",
+        "raw": entry,
+    }
+
+
+def score_entry_match(search_term, entry):
+    """
+    Score how well a dictionary entry matches the user's search term.
+
+    Higher score = better match.
+    Low score = likely unrelated result.
+    """
+    term = clean_text(search_term)
+
+    word = clean_text(entry.get("word"))
+    glossary = clean_text(entry.get("glossary"))
+    definition = clean_text(entry.get("definition"))
+
+    score = 0
+
+    if term == word:
+        score += 100
+
+    if term == glossary:
+        score += 90
+
+    if term == definition:
+        score += 90
+
+    if glossary.startswith(term):
+        score += 70
+
+    if definition.startswith(term):
+        score += 70
+
+    full_word_pattern = rf"\b{re.escape(term)}\b"
+
+    if re.search(full_word_pattern, glossary):
+        score += 10
+
+    if re.search(full_word_pattern, definition):
+        score += 10
+
+    score += int(similarity(term, word) * 20)
+    score += int(similarity(term, glossary) * 15)
+    score += int(similarity(term, definition) * 15)
+
+    return score
 
 def extract_count(user_input, default=5, maximum=10):
     """
@@ -533,11 +615,17 @@ def extract_best_vocab_entry(api_response, search_term, topic=None, minimum_scor
     for raw_entry in results:
         entry = get_entry_fields(raw_entry)
 
-        if topic == "numbers" and not is_number_definition(search_term, entry):
+        if topic == "numbers":
+            if is_number_definition(search_term, entry):
+                score = score_entry_match(search_term, entry)
+                scored_entries.append((score, entry))
             continue
 
+        # Normal vocabulary-list matching.
         score = score_entry_match(search_term, entry)
-        scored_entries.append((score, entry))
+
+        if score >= minimum_score:
+            scored_entries.append((score, entry))
 
     if not scored_entries:
         return None
@@ -545,11 +633,8 @@ def extract_best_vocab_entry(api_response, search_term, topic=None, minimum_scor
     scored_entries.sort(key=lambda item: item[0], reverse=True)
 
     best_score, best_entry = scored_entries[0]
-
-    if best_score < minimum_score:
-        return None
-
     best_entry["match_score"] = best_score
+
     return best_entry
 
 def is_reasonable_match(search_term, entry):
@@ -793,6 +878,9 @@ def build_word_list(topic):
         if not is_reasonable_match(term, entry):
             continue
 
+        entries.append(entry)
+
+        entry["search_term"] = term
         entries.append(entry)
 
     if not entries:
@@ -1045,7 +1133,6 @@ def evaluate_query(user_input):
         "response": response,
     }
 
-
 if __name__ == "__main__":
     while True:
         user_input = input("\nAsk a question, or type 'quit': ")
@@ -1054,87 +1141,3 @@ if __name__ == "__main__":
             break
 
         print(process_input(user_input))
-
-def similarity(a, b):
-    """
-    Return a rough similarity score between two strings.
-    """
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
-
-
-def clean_text(value):
-    """
-    Normalize text for matching.
-    """
-    if not value:
-        return ""
-
-    return (
-        str(value)
-        .lower()
-        .replace("“", '"')
-        .replace("”", '"')
-        .replace("‘", "'")
-        .replace("’", "'")
-        .strip()
-    )
-
-
-def get_entry_fields(entry):
-    """
-    Extract word, glossary, and definition from a raw API entry.
-    """
-    senses = entry.get("senses", [])
-    first_sense = senses[0] if senses else {}
-
-    return {
-        "word": entry.get("word", "Unknown"),
-        "glossary": first_sense.get("glossary") or "No glossary available",
-        "definition": first_sense.get("definition") or "No definition available",
-        "raw": entry,
-    }
-
-
-def score_entry_match(search_term, entry):
-    """
-    Score how well a dictionary entry matches the user's search term.
-
-    Higher score = better match.
-    Low score = likely unrelated result.
-    """
-    term = clean_text(search_term)
-
-    word = clean_text(entry.get("word"))
-    glossary = clean_text(entry.get("glossary"))
-    definition = clean_text(entry.get("definition"))
-
-    score = 0
-
-    if term == word:
-        score += 100
-
-    if term == glossary:
-        score += 90
-
-    if term == definition:
-        score += 90
-
-    if glossary.startswith(term):
-        score += 70
-
-    if definition.startswith(term):
-        score += 70
-
-    full_word_pattern = rf"\b{re.escape(term)}\b"
-
-    if re.search(full_word_pattern, glossary):
-        score += 10
-
-    if re.search(full_word_pattern, definition):
-        score += 10
-
-    score += int(similarity(term, word) * 20)
-    score += int(similarity(term, glossary) * 15)
-    score += int(similarity(term, definition) * 15)
-
-    return score
