@@ -877,8 +877,6 @@ def build_word_list(topic):
         if not is_reasonable_match(term, entry):
             continue
 
-        entries.append(entry)
-
         entry["search_term"] = term
         entries.append(entry)
 
