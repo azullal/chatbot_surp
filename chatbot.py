@@ -5,6 +5,7 @@ import requests
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from difflib import SequenceMatcher
 
 load_dotenv()
 
@@ -104,7 +105,7 @@ def extract_count(user_input, default=5, maximum=10):
         "nine": 9,
         "ten": 10,
     }
-    
+
     digit_match = re.search(r"\b(\d+)\b", text)
 
     if digit_match:
@@ -178,6 +179,12 @@ def classify_request(user_input):
             "sentences for",
             "use the word",
             "using the word",
+            "sentence using",
+            "sentences using",
+            "show me a sentence",
+            "show me sentences",
+            "give me a sentence",
+            "give me sentences",
         ]
     )
 
@@ -508,9 +515,11 @@ def search_example_sentences(query, limit=20):
         print(f"Example sentence search error: {error}")
         return None
 
-def extract_best_entry(api_response):
+def extract_best_entry(api_response, search_term=None, minimum_score=60):
     """
-    Select the best dictionary entry from the API response.
+    Select the best dictionary entry based on match quality.
+
+    This avoids accepting unrelated first results.
     """
     if not api_response:
         return None
@@ -520,19 +529,27 @@ def extract_best_entry(api_response):
     if not results:
         return None
 
-    entry = results[0]
-    senses = entry.get("senses", [])
-    first_sense = senses[0] if senses else {}
+    # If no search term is given, fall back to first result.
+    # But most calls should pass search_term.
+    if not search_term:
+        return get_entry_fields(results[0])
 
-    glossary = first_sense.get("glossary")
-    definition = first_sense.get("definition")
+    scored_entries = []
 
-    return {
-        "word": entry.get("word", "Unknown"),
-        "glossary": glossary or "No glossary available",
-        "definition": definition or "No definition available",
-        "raw": entry,
-    }
+    for raw_entry in results:
+        entry = get_entry_fields(raw_entry)
+        score = score_entry_match(search_term, entry)
+        scored_entries.append((score, entry))
+
+    scored_entries.sort(key=lambda item: item[0], reverse=True)
+
+    best_score, best_entry = scored_entries[0]
+
+    if best_score < minimum_score:
+        return None
+
+    best_entry["match_score"] = best_score
+    return best_entry
 
 def is_reasonable_match(search_term, entry):
     """
@@ -570,7 +587,7 @@ def lookup_word(user_input):
     """
     search_term = rewrite_query(user_input)
     api_response = search_dictionary(search_term)
-    entry = extract_best_entry(api_response)
+    entry = extract_best_entry(api_response, search_term)
 
     if not entry:
         return None
@@ -648,7 +665,7 @@ def build_sentences(user_input):
     search_term = rewrite_query(user_input)
 
     api_response = search_dictionary(search_term)
-    entry = extract_best_entry(api_response)
+    entry = extract_best_entry(api_response, search_term)
 
     if not entry:
         return f"""
@@ -716,7 +733,7 @@ def build_word_list(topic):
 
     for term in search_terms:
         api_response = search_dictionary(term)
-        entry = extract_best_entry(api_response)
+        entry = extract_best_entry(api_response, term)
 
         if not entry:
             continue
@@ -877,6 +894,20 @@ I can help compare it against verified example sentences or dictionary entries, 
 
     return None
 
+def is_general_vocab_request(user_input):
+    text = normalize_text(user_input)
+
+    general_patterns = [
+        "give me some paiute words",
+        "show me some paiute words",
+        "give me paiute words",
+        "show me paiute words",
+        "some paiute words",
+        "paiute vocabulary",
+    ]
+
+    return any(pattern in text for pattern in general_patterns)
+
 def process_input(user_input):
     """
     Main function called by app.py or main.py.
@@ -888,7 +919,23 @@ def process_input(user_input):
 
     if is_unsupported_translation_request(user_input):
         return safe_translation_response()
+    
+    if is_general_vocab_request(user_input):
+        return """
+    ## Choose a Vocabulary Topic
 
+    I can give you Paiute vocabulary from the dictionary, but I need a topic so the list is useful.
+
+    Try asking for:
+    - food vocabulary
+    - animal vocabulary
+    - family vocabulary
+    - body part vocabulary
+    - number vocabulary
+    - household vocabulary
+
+    Example: “Give me a list of food vocabulary.”
+    """
     intent = classify_request(user_input)
 
     if intent == "vocab_and_sentences":
@@ -957,3 +1004,87 @@ if __name__ == "__main__":
             break
 
         print(process_input(user_input))
+
+def similarity(a, b):
+    """
+    Return a rough similarity score between two strings.
+    """
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+def clean_text(value):
+    """
+    Normalize text for matching.
+    """
+    if not value:
+        return ""
+
+    return (
+        str(value)
+        .lower()
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
+        .strip()
+    )
+
+
+def get_entry_fields(entry):
+    """
+    Extract word, glossary, and definition from a raw API entry.
+    """
+    senses = entry.get("senses", [])
+    first_sense = senses[0] if senses else {}
+
+    return {
+        "word": entry.get("word", "Unknown"),
+        "glossary": first_sense.get("glossary") or "No glossary available",
+        "definition": first_sense.get("definition") or "No definition available",
+        "raw": entry,
+    }
+
+
+def score_entry_match(search_term, entry):
+    """
+    Score how well a dictionary entry matches the user's search term.
+
+    Higher score = better match.
+    Low score = likely unrelated result.
+    """
+    term = clean_text(search_term)
+
+    word = clean_text(entry.get("word"))
+    glossary = clean_text(entry.get("glossary"))
+    definition = clean_text(entry.get("definition"))
+
+    score = 0
+
+    if term == word:
+        score += 100
+
+    if term == glossary:
+        score += 90
+
+    if term == definition:
+        score += 90
+
+    if glossary.startswith(term):
+        score += 70
+
+    if definition.startswith(term):
+        score += 70
+
+    full_word_pattern = rf"\b{re.escape(term)}\b"
+
+    if re.search(full_word_pattern, glossary):
+        score += 35
+
+    if re.search(full_word_pattern, definition):
+        score += 35
+
+    score += int(similarity(term, word) * 20)
+    score += int(similarity(term, glossary) * 15)
+    score += int(similarity(term, definition) * 15)
+
+    return score
