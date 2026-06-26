@@ -515,11 +515,10 @@ def search_example_sentences(query, limit=20):
         print(f"Example sentence search error: {error}")
         return None
 
-def extract_best_entry(api_response, search_term=None, minimum_score=75):
+def extract_best_vocab_entry(api_response, search_term, topic=None, minimum_score=60):
     """
-    Select the best dictionary entry based on match quality.
-
-    This avoids accepting unrelated first results.
+    Select the best entry for vocabulary lists.
+    Adds topic-aware filtering for cases like numbers.
     """
     if not api_response:
         return None
@@ -529,17 +528,19 @@ def extract_best_entry(api_response, search_term=None, minimum_score=75):
     if not results:
         return None
 
-    # If no search term is given, fall back to first result.
-    # But most calls should pass search_term.
-    if not search_term:
-        return get_entry_fields(results[0])
-
     scored_entries = []
 
     for raw_entry in results:
         entry = get_entry_fields(raw_entry)
+
+        if topic == "numbers" and not is_number_definition(search_term, entry):
+            continue
+
         score = score_entry_match(search_term, entry)
         scored_entries.append((score, entry))
+
+    if not scored_entries:
+        return None
 
     scored_entries.sort(key=lambda item: item[0], reverse=True)
 
@@ -587,7 +588,7 @@ def lookup_word(user_input):
     """
     search_term = rewrite_query(user_input)
     api_response = search_dictionary(search_term)
-    entry = extract_best_entry(api_response, search_term)
+    entry = extract_best_vocab_entry(api_response, search_term)
 
     if not entry:
         return None
@@ -665,7 +666,7 @@ def build_sentences(user_input):
     search_term = rewrite_query(user_input)
 
     api_response = search_dictionary(search_term)
-    entry = extract_best_entry(api_response, search_term)
+    entry = extract_best_vocab_entry(api_response, search_term)
 
     if not entry:
         return f"""
@@ -728,23 +729,45 @@ def is_number_definition(search_term, entry):
     """
     Check whether a dictionary result is actually defining the number,
     not just using the number word inside another phrase.
+
+    Good:
+    - one -> "The number one, cardinal number one."
+    - three -> "Cardinal number three..."
+    - four -> "Cardinal number four."
+    - five -> "Cardinal number five."
+
+    Bad:
+    - one -> "One hundred"
+    - five -> "Five Bridges Area"
+    - seven -> "seven year locust/cicada"
     """
     term = clean_text(search_term)
     glossary = clean_text(entry.get("glossary"))
     definition = clean_text(entry.get("definition"))
-
-    acceptable_phrases = [
-        f"the number {term}",
-        f"cardinal number {term}",
-        f"number {term}",
-        f"{term},",
-        f"{term}.",
-        f"{term};",
-    ]
-
     combined = f"{glossary} {definition}"
 
-    return any(phrase in combined for phrase in acceptable_phrases)
+    strong_patterns = [
+        rf"\bthe number {re.escape(term)}\b",
+        rf"\bcardinal number {re.escape(term)}\b",
+        rf"\bnumber {re.escape(term)}\b",
+        rf"^{re.escape(term)}[,.;:]",
+    ]
+
+    bad_patterns = [
+        rf"\b{re.escape(term)} hundred\b",
+        rf"\b{re.escape(term)} bridges\b",
+        rf"\b{re.escape(term)} bridge\b",
+        rf"\b{re.escape(term)} year\b",
+        rf"\b{re.escape(term)}-year\b",
+    ]
+
+    if any(re.search(pattern, combined) for pattern in bad_patterns):
+        return False
+
+    if any(re.search(pattern, combined) for pattern in strong_patterns):
+        return True
+
+    return False
 
 def build_word_list(topic):
     """
@@ -756,12 +779,13 @@ def build_word_list(topic):
 
     for term in search_terms:
         api_response = search_dictionary(term)
-        entry = extract_best_entry(api_response, term)
+        entry = extract_best_vocab_entry(api_response, term, topic=topic)
 
         if not entry:
             continue
 
         entry["search_term"] = term
+        entries.append(entry)
 
         if topic == "numbers" and not is_number_definition(term, entry):
             continue
