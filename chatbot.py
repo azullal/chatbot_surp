@@ -515,7 +515,7 @@ def search_example_sentences(query, limit=20):
         print(f"Example sentence search error: {error}")
         return None
 
-def extract_best_entry(api_response, search_term=None, minimum_score=60):
+def extract_best_entry(api_response, search_term=None, minimum_score=75):
     """
     Select the best dictionary entry based on match quality.
 
@@ -724,10 +724,33 @@ I found the dictionary entry, but I could not find verified example sentences fr
 **Definition:** {entry.get("definition", "No definition available")}
 """
 
+def is_number_definition(search_term, entry):
+    """
+    Check whether a dictionary result is actually defining the number,
+    not just using the number word inside another phrase.
+    """
+    term = clean_text(search_term)
+    glossary = clean_text(entry.get("glossary"))
+    definition = clean_text(entry.get("definition"))
+
+    acceptable_phrases = [
+        f"the number {term}",
+        f"cardinal number {term}",
+        f"number {term}",
+        f"{term},",
+        f"{term}.",
+        f"{term};",
+    ]
+
+    combined = f"{glossary} {definition}"
+
+    return any(phrase in combined for phrase in acceptable_phrases)
+
 def build_word_list(topic):
     """
     Build a vocabulary list using dictionary API lookups.
     """
+    topic = topic.lower().strip()
     search_terms = generate_topic_words(topic)
     entries = []
 
@@ -739,6 +762,9 @@ def build_word_list(topic):
             continue
 
         entry["search_term"] = term
+
+        if topic == "numbers" and not is_number_definition(term, entry):
+            continue
 
         if not is_reasonable_match(term, entry):
             continue
@@ -1078,10 +1104,10 @@ def score_entry_match(search_term, entry):
     full_word_pattern = rf"\b{re.escape(term)}\b"
 
     if re.search(full_word_pattern, glossary):
-        score += 35
+        score += 10
 
     if re.search(full_word_pattern, definition):
-        score += 35
+        score += 10
 
     score += int(similarity(term, word) * 20)
     score += int(similarity(term, glossary) * 15)
